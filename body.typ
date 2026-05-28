@@ -259,7 +259,7 @@ Root-only settlement transcript. Settlement calldata exposes roots, commitments,
 
 Output bucketing and dummy slots. Output bundles are padded to configured size buckets. Dummy encrypted slots have the same public structure as real encrypted output records. Exact fill count is hidden within the bucket; the bucket class itself remains public.
 
-Delayed artifact publication. Settlement artifacts and output bundle references are delayed before appearing on public routes. The delay is epoch-progress based and depends on heartbeat publication for quiet markets. This does not substitute for private retrieval, but it prevents the public indexer from functioning as a real-time fill notification channel.
+Delayed artifact publication. Settlement artifacts and output bundle references are delayed before appearing on public routes. The production policy uses a multi-epoch delay range with deterministic epoch-bucket jitter and depends on heartbeat publication for quiet markets. Artifact delay is not intended to hide that an epoch eventually settled; its purpose is to prevent public artifact availability from becoming a real-time signal for order arrival, fill shape, or output-claim timing. Public artifacts are exposed on the same release schedule as multi-pair epoch-bucket bundles, so a pair-specific route does not publish ahead of its bundle window.
 
 Multi-pair artifact bundles. Public artifact bundles aggregate commitments across pairs and epoch ranges. Pair heartbeats give every enabled pair a regular clock; multi-pair bundles reduce pair-level activity disclosure within the bundle.
 
@@ -300,7 +300,7 @@ The public chain sees enabled markets, scheduled epochs, proof facts, root trans
 <appendix-a-public-leakage-boundary>
 #set par(justify: false, first-line-indent: 0pt, leading: 0.52em, spacing: 0.48em)
 #set text(size: 9.55pt)
-After the defense stack in Section 5.3, the allowed public leakage function `L` contains the enabled pairs and epoch schedules; fixed epoch duration and deployment configuration; proof program hashes and verifier configuration; batch identifiers and root transition sequence; bucketed output bundle size class per epoch, not the exact fill count within the bucket; delayed artifact availability after the configured delay; deposit transactions and public fields from the selected funding rail; note consolidation proof facts, root transitions, and output bundle references; withdrawal transactions, public recipients, and public adapter fields; coarse timing of paymaster-relayed withdrawals; and gas paid by protocol, coordinator, or paymaster accounts.
+After the defense stack in Section 5.3, the allowed public leakage function `L` contains the enabled pairs and epoch schedules; fixed epoch duration and deployment configuration; proof program hashes and verifier configuration; batch identifiers and root transition sequence; bucketed output bundle size class per epoch, not the exact fill count within the bucket; delayed artifact availability after the configured jittered delay range; deposit transactions and public fields from the selected funding rail; note consolidation proof facts, root transitions, and output bundle references; withdrawal transactions, public recipients, and public adapter fields; coarse timing of paymaster-relayed withdrawals; and gas paid by protocol, coordinator, or paymaster accounts.
 
 The public transcript is designed not to reveal plaintext order side, size, or limit price; funding note ownership or private balances; output note ownership before withdrawal; exact private fill count inside a padded output bucket; hidden maker curve shape, inventory bands, or unfilled depth; scheduler parent strategy, remaining schedule, or total parent size; the association between a child commitment and its parent; or the notes, amounts, and owner involved in a consolidation operation.
 
@@ -325,7 +325,7 @@ Deposit entry, user-facing transport, and private retrieval are protocol-edge su
     [Output note count], [padded output bundles to configured size buckets; dummy encrypted slots with identical public structure],
     [Recipient inference], [recipient-private note encryption; nonzero empty output-note root binding],
     [Settlement transcript structure], [root-only calldata; delayed public transcript routes; full transcripts behind bearer-auth internal routes],
-    [Artifact publication timing], [delayed public artifact availability after configured epoch-progress threshold; heartbeat-dependent for quiet markets],
+    [Artifact publication timing], [delayed public artifact availability after configured multi-epoch jitter range; heartbeat-dependent for quiet markets; public bundles aggregate pairs across epoch buckets],
     [Gas payer identity], [protocol-side settlement account for batch settlement; paymaster relay for withdrawals],
     [Deposit entry correlation], [Starknet Privacy funding rail; deposit-note activation; amount bucketing as client policy],
     [Claim and exit timing], [claim delay window; withdrawal window policy],
