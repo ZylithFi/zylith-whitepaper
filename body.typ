@@ -255,7 +255,7 @@ Each category requires different controls. A ZK proof does not address gas payer
 <protocol-defenses>
 Fixed epochs and pair heartbeats. Enabled pairs run on scheduled epochs. Heartbeat and no-op/no-cross artifacts preserve cadence when private order flow is absent. Sentinel values that would label a heartbeat epoch as empty are avoided on the heartbeat path. Batch-close jitter and settlement-submission jitter operate below the epoch clock, preventing close time and proof-submission time from becoming exact signals for order arrival or prover completion.
 
-Root-only settlement transcript. Settlement calldata exposes roots, commitments, and bucketed transcript shape without exposing consumed note arrays, individual output notes, fee rows, renewal records, or per-order fills. Public transcript routes serve only this root-only view after the configured delay; the witness transcript is retained only in restricted infrastructure routes and local prover artifacts.
+Root-only settlement transcript. Settlement calldata exposes roots, commitments, and bucketed transcript shape without exposing consumed note arrays, individual output notes, variable fee-row shape, renewal records, or per-order fills. Public transcript routes serve only this root-only view after the configured delay; fee custody remains public accounting under fixed-shape fee slots. The witness transcript is retained only in restricted infrastructure routes and local prover artifacts.
 
 Output bucketing and dummy slots. Output bundles are padded to configured size buckets. Dummy encrypted slots have the same public structure as real encrypted output records. Exact fill count is hidden within the bucket; the bucket class itself remains public.
 
