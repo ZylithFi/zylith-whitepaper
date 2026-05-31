@@ -59,7 +59,9 @@ A valid spend proves note membership against the prior note root and sparse non-
 
 Notes originate from deposits into the protocol, settlement outputs from matched orders, change notes returned on partial fills, and consolidation outputs. The note commitment tree is append-only. The wallet reconstructs balances by fetching encrypted output bundles from the indexer, attempting recognition with `sk_note_recog`, and accumulating recognized spendable notes locally.
 
-Withdrawal from a settlement output is a separate AuctionVerifier action. The withdrawer proves membership of an output note in the batch output note root, satisfies the configured claim delay, and supplies a domain-bound withdrawal authorization signed under `sk_withdraw_auth`. The authorization binds the adapter, batch identifier, note commitment, asset, amount, and public recipient; asset release is routed through the shielded asset adapter. AuctionVerifier marks the output note commitment withdrawn before executing the release.
+Funding uses STRK20 as the external shielding and funding rail. A funding transaction moves the selected token amount into bridge-as-adapter escrow and calls the Zylith funding bridge with an opaque activation tuple: `funding_commitment`, `deposit_root`, and `encrypted_note_activation`. The bridge accepts activation only from the configured STRK20 pool and records that tuple through the commitment registry; it does not receive the note preimage or deposit nonce. The Zylith public activation surface reveals timing plus those three opaque fields. Token, amount, open-note, compliance, and other pool-visible fields remain part of the external STRK20 transcript rather than the Zylith settlement proof.
+
+Withdrawal from a settlement output is verifier-mediated. The withdrawer proves output-note membership in the verifier-recorded output root, proves insertion of the corresponding withdrawal nullifier against the current nullifier root, satisfies the claim delay, and supplies a domain-bound withdrawal authorization signed under `sk_withdraw_auth`. In the STRK20 open-note path, that authorization binds the adapter, batch identifier, note commitment, asset, amount, and staged exit commitment; the bridge then requires a second authorization for the selected STRK20 open-note id. AuctionVerifier advances the nullifier root, marks the output note withdrawn, and routes asset release through the shielded asset adapter. A legacy public-recipient path, if enabled for compatibility, binds the public recipient instead of a STRK20 exit commitment.
 
 == 2.3 System State
 <system-state>
@@ -70,14 +72,14 @@ Withdrawal from a settlement output is a separate AuctionVerifier action. The wi
     table.header([Component], [State]),
     table.hline(),
     [Embedded wallet], [encrypted vault, recognized notes, active orders, scheduler state, offline renewal packages, execution reports, pending withdrawals],
-    [AuctionVerifier], [note_root, nullifier_root, renewal_root, fee_root, batch registry, output bundle roots, withdrawn output notes, proof program config and lock state, gate and timing config, pause state],
+    [AuctionVerifier], [note_root, nullifier_root, renewal_root, fee_root, batch registry, output bundle roots, withdrawn output notes, proof program config and lock state, claim-delay config, pause state],
     [Coordinator], [order commitments, receipts, batch manifests, public artifacts, artifact publication state],
     [Prover ingress], [ingress key material, encrypted payload processing, witness assembly, proof facts],
   )],
   kind: table,
 )
 
-Deposits advance the note root. Settlements consume current roots and write new roots atomically. Note consolidation consumes already-owned notes and advances note and nullifier roots without changing auction state. Withdrawals mark an output note commitment withdrawn and release assets through the adapter. Renewal cancellation and child use update the renewal root.
+Deposits advance the note root. Settlements consume current roots and write new roots atomically. Note consolidation consumes already-owned notes and advances note and nullifier roots without changing auction state. Withdrawals advance the nullifier root and record the redeemed output note before asset release. Renewal cancellation and child use update the renewal root.
 
 = 3. Auction Lifecycle
 <auction-lifecycle>
@@ -101,7 +103,7 @@ The order commitment is a Poseidon-domain-separated hash over these fields. For 
 
 Epochs are fixed-duration and pair-specific. An order is accepted only within its target batch window and expires if not admitted. Fill-or-kill is a time-in-force constraint. Block-style all-or-none execution is encoded as `min_fill = amount` rather than as a distinct public order class, keeping the visible order surface minimal.
 
-Submission smoothing delays the encrypted private payload by a bounded random interval inside the batch window, applied uniformly to limit orders, maker curve submissions, scheduler children, and safe cancel-replace paths. The delay is not applied when it would push the submission past the batch safety buffer.
+Submission smoothing delays the encrypted private payload by a bounded random interval inside the batch window for limit orders, maker curve submissions, and scheduler children. The delay is not applied when it would push the submission past the batch safety buffer. Cancellation and replacement endpoints are commitment-bound coordinator operations and remain part of the access-pattern surface.
 
 == 3.2 Batch Clearing
 <batch-clearing>
@@ -114,35 +116,23 @@ eligible_sell(p) = { o in O : side = sell and limit_price <= p }
 
 The clearing price `p_star` maximizes matched base volume subject to order constraints, maker curve capacity, minimum fill, and fill-or-kill requirements, with deterministic imbalance and lower-price tie-breaks. Fills are allocated at `p_star`. Residuals return as change notes.
 
-Uniform pricing gives a specific information property: a filled buy reveals only that its private limit was at least `p_star`, and a filled sell reveals only that its private limit was at most `p_star`. The exact bound, original order size, and funding note ownership remain in the witness and local wallet records. The clearing price is a statistic over the full admitted order set, not a direct record of an individual order, provided the batch has sufficient independent participation. The privacy-quality gates in Section 3.3 encode that condition.
+Uniform pricing gives a specific information property: a filled buy reveals only that its private limit was at least `p_star`, and a filled sell reveals only that its private limit was at most `p_star`. The exact bound, original order size, and funding note ownership remain in the witness and local wallet records. The clearing price is a statistic over the admitted order set, not a direct record of an individual order.
 
 Fixed epochs make settlement timing a protocol clock rather than a function of private order arrival. Any reactive settlement system, meaning one that creates an onchain event when a match occurs, makes the timing of public events a function of private order arrival. The proof certifies correctness of the computation; it does not make the computation's occurrence unobservable. A fixed-epoch system decouples the occurrence of a public artifact from the occurrence of a match by producing artifacts on schedule regardless. Enabled pairs therefore produce heartbeat, no-op, and no-cross artifacts alongside matched settlements, so the existence of an artifact does not by itself identify private order flow.
 
-== 3.3 Privacy-Quality Gates
-<privacy-quality-gates>
-A thin or dominated batch can let a participant infer too much from its own fill and the public clearing price. Gate conditions define when the auction is permitted to finalize private fills. The configured gate witness checks:
-
-```text
-min_batch_base_liquidity
-min_batch_participants
-min_eligible_orders
-max_single_order_fill_bps
-max_single_owner_fill_bps
-min_maker_participants
-max_maker_fill_bps
-```
-
-If gate conditions are not met, private fills are not finalized. The epoch settles through a gate-failure no-fill, no-op, no-cross, or heartbeat-cover path. Scheduler and renewal logic may resubmit into a later epoch. Gate thresholds are deployment market parameters; changing them changes the allowed leakage function.
+== 3.3 Economic Guard Policy
+<economic-guard-policy>
+Economic guards are separate from privacy-shape controls. Pair configuration carries supported assets, minimum order amounts, fee bps, price scales, and enablement state. The prover and statements enforce asset compatibility, minimum order size, fill constraints, maker-curve shape, dust rejection, fee-root accounting, and value conservation. These guards enforce settlement validity and economic constraints; they are not anonymity-set guarantees.
 
 == 3.4 Hidden Maker Curves
 <hidden-maker-curves>
 A hidden maker curve is passive liquidity across private price-depth bands. A maker specifies `(price, depth)` points without publishing a public orderbook. The maker curve commitment is part of the order preimage. Settlement can consume eligible curve depth at `p_star`, but the public record does not expose the curve shape, unfilled depth, or inventory bands; only the net root transition reflects the settlement.
 
-Valid maker curves specify at least three strictly increasing price-depth bands, satisfy pair-specific minimum band depth and minimum outer-band price range, and bind the curve commitment into the order preimage. Maker fee eligibility requires renewal-backed child authorization. A one-shot maker curve order is valid only as taker-fee flow; it does not receive maker-fee treatment.
+Valid maker curves specify at least three strictly increasing price-depth bands, satisfy pair-specific minimum band depth and minimum outer-band price range, and bind the curve commitment into the order preimage. Maker-fee treatment applies to valid maker-curve orders. Managed Zylith Relay fee treatment additionally requires the order to carry `ZylithRelay` relay mode and to enter through a renewal package attestation that binds package id, package commitment, and relay mode in the private ingress receipt.
 
-Maker commitments are fresh per epoch. Resting maker strategies keep the private curve in the embedded wallet and materialize each child with bounded price and depth rotation before funding selection and private ingress submission. Bounded renewal windows, randomized slicing, maker exposure limits, and dominance caps reduce repeated-shape fingerprints; persistent economic effects can still be inferred statistically over long histories.
+Maker commitments are fresh per epoch. Resting maker strategies keep the private curve in the embedded wallet and materialize each child with bounded price and depth rotation before funding selection and private ingress submission. Bounded renewal windows, randomized slicing, and maker exposure limits reduce repeated-shape fingerprints; persistent economic effects can still be inferred statistically over long histories.
 
-Offline delegated renewal uses exact-slot preauthorization. A renewal operator receives authority for specific authorized slots and does not receive the wallet spend key, withdrawal key, or reusable future authority. Parent cancellation updates the renewal root so future children cannot be accepted after cancellation. Child replay is rejected by renewal nullifier state.
+Offline delegated renewal uses exact-slot preauthorization. A renewal operator receives authority for specific authorized slots and does not receive the wallet spend key, withdrawal key, or reusable future authority. Parent cancellation updates the renewal root so future children cannot be accepted after cancellation. Relay packages must carry the parent cancellation marker so operators can stop submissions before settlement rejection. Child replay is rejected by renewal nullifier state.
 
 == 3.5 Scheduled Execution
 <scheduled-execution>
@@ -165,7 +155,7 @@ Zylith uses scoped ZK-STARK statements proved through the Starknet prover endpoi
 
 The admission statement proves that each admitted order commitment correctly binds its preimage, that each non-cover order has valid funding-note-set authorization, that non-cover funding nullifiers are correctly derived and aggregated, and that the admission summary root is correctly computed. Heartbeat-cover orders are protocol-generated order commitments and are admitted without funding-note binding. The statement's public outputs are `batch_id`, `order_commitment_root`, and `admission_root`.
 
-The auction-result statement takes `admission_root` as input and proves allocation feasibility at the committed clearing price, consistency of hidden maker curve commitments with the allocation, satisfaction of the matched-volume clearing rule, passage of all configured privacy gates, or validity of a no-cross, gate-failure no-fill, empty no-op, or heartbeat-cover path. Its public outputs are `batch_id`, `order_commitment_root`, `admission_root`, and `transcript_commitment`.
+The auction-result statement takes `admission_root` as input and proves allocation feasibility at the committed clearing price, consistency of hidden maker curve commitments with the allocation, satisfaction of the matched-volume clearing rule, or validity of a no-cross, empty no-op, or heartbeat-cover path. Its public outputs are `batch_id`, `order_commitment_root`, `admission_root`, and `transcript_commitment`.
 
 The settlement statement takes `transcript_commitment` and proves pair and epoch binding, consumed note membership against the prior note root, order and output-note formation, output bundle binding, fee computation, value conservation, and the public settlement commitment verified by AuctionVerifier. The nullifier statement proves 128-depth sparse non-membership and insertion against the nullifier root. The renewal statement proves 128-depth parent-cancel absence and child insertion against the renewal root.
 
@@ -173,11 +163,13 @@ Note consolidation is a separate maintenance statement. It consumes a set of alr
 
 AuctionVerifier enforces the relationship between these statements before state changes. Settlement is accepted only when the recorded `transcript_commitment` for the batch, the `batch_id`, the `order_commitment_root`, and the current roots match the settlement calldata; the settlement proof facts carry the settlement, nullifier, and renewal messages bound to the same transcript commitment; and the recorded transcript commitment is itself accepted only after it has been bound to the recorded `admission_root`.
 
-The admission statement proves order preimage binding, funding-note-set binding, funding authorization, and nullifier derivation in Cairo. The auction-result statement proves allocation feasibility, privacy gates, and clearing-price optimality through `assert_best_clearing_price`.
+The admission statement proves order preimage binding, funding-note-set binding, funding authorization, and nullifier derivation in Cairo. The auction-result statement proves allocation feasibility and clearing-price optimality through `assert_best_clearing_price`.
 
 == 4.2 Root Chaining and Aggregate Settlement
 <root-chaining-and-aggregate-settlement>
 AuctionVerifier maintains root families for notes, nullifiers, renewals, and fees. Each settlement atomically consumes current roots and writes new roots. The batch registry records prepared and settled batches to prevent double settlement.
+
+Output-note uniqueness is cryptographic rather than registry-backed. Duplicate commitments are rejected within each output root, while cross-batch uniqueness relies on domain-separated, high-entropy commitment generation.
 
 Native aggregate settlement chains ordered transitions. If batch `i` writes roots `R_i`, batch `i + 1` must prove against `R_i`. An aggregate proof over `n` batches proves the member transitions in one virtual Cairo execution:
 
@@ -224,7 +216,7 @@ new_fee_root
 
 AuctionVerifier does not store individual fills, maker curve points, plaintext orders, or per-order settlement details. Fee rows are root-bound aggregate entries and are paid through encrypted fee output notes, not public per-order records. The public record after settlement is a verified root transition, a fee root, and an output bundle root.
 
-The fee policy is pair-class based. Speculative pairs use a 4 bps taker fee, 0 bps maker fee, and 2 bps relay fee for makers using the Zylith renewal relay. Conversion pairs use a 2 bps taker fee, 0 bps maker fee, and 1 bps relay fee for makers using the Zylith renewal relay. Makers using self-relay pay no relay fee. Protocol and relay fees are included in the proved fee root and paid as encrypted output notes to the configured fee recipients, so exact fee amounts are not exposed through settlement calldata.
+The fee policy is pair-class based. Speculative pairs use a 4 bps taker fee, 0 bps maker fee, and 2 bps relay fee for makers using the Zylith renewal relay. Conversion pairs use a 2 bps taker fee, 0 bps maker fee, and 1 bps relay fee for makers using the Zylith renewal relay. Makers using self-relay pay no relay fee. Protocol and relay fees are included in the proved fee root and paid as encrypted output notes to the configured fee recipients, so exact fee amounts are not exposed through settlement calldata. Fee recipients recover settlement fees as encrypted fee notes rather than through a public fee ledger.
 
 = 5. Market Access-Pattern Privacy
 <market-access-pattern-privacy>
@@ -252,7 +244,7 @@ Each category requires different controls. A ZK proof does not address gas payer
 <protocol-defenses>
 Fixed epochs and pair heartbeats. Enabled pairs run on scheduled epochs. Heartbeat and no-op/no-cross artifacts preserve cadence when private order flow is absent. Sentinel values that would label a heartbeat epoch as empty are avoided on the heartbeat path. Batch-close jitter and settlement-submission jitter operate below the epoch clock, preventing close time and proof-submission time from becoming exact signals for order arrival or prover completion.
 
-Root-only settlement transcript. Settlement calldata exposes roots, commitments, and bucketed transcript shape without exposing consumed note arrays, individual output notes, variable fee-row shape, renewal records, or per-order fills. Public transcript routes serve only this root-only view after the configured delay; fee custody remains public accounting under fixed-shape fee slots. The witness transcript is retained only in restricted infrastructure routes and local prover artifacts.
+Root-only settlement transcript. Settlement calldata exposes roots, commitments, and bucketed transcript shape without exposing consumed note arrays, individual output notes, variable fee-row shape, renewal records, or per-order fills. Public transcript routes serve only this root-only view after the configured delay; fee custody remains shielded fee-root accounting paid through encrypted fee output notes. The witness transcript is retained only in restricted infrastructure routes and local prover artifacts.
 
 Output bucketing and dummy slots. Output bundles are padded to configured size buckets. Dummy encrypted slots have the same public structure as real encrypted output records. Exact fill count is hidden within the bucket; the bucket class itself remains public.
 
@@ -260,7 +252,7 @@ Delayed artifact publication. Settlement artifacts and output bundle references 
 
 Multi-pair artifact bundles. Public artifact bundles aggregate commitments across pairs and epoch ranges. Pair heartbeats give every enabled pair a regular clock; multi-pair bundles reduce pair-level activity disclosure within the bundle.
 
-Privacy-quality gates. The gate conditions in Section 3.3 prevent thin or dominated batches from settling as private fills. Below the thresholds, the batch takes a gate-failure no-fill, no-op, no-cross, or heartbeat-cover path.
+Economic guards. Pair enablement, supported-asset allowlists, minimum order amounts, maker-curve bounds, dust rejection, fee bps caps, fee-root accounting, and settlement validity checks remain enforced independently of access-pattern controls.
 
 Submission smoothing. Bounded random delay on private payload submission within the batch window prevents the coordinator and prover ingress from observing exact submission timing correlated with a trader's local decision to act.
 
@@ -270,7 +262,7 @@ Client query cadence. The app polls public batch state on a fixed cadence and sc
 
 Cancellation and replacement. Cancellation is accepted only while the target batch is still open and replacement orders use fresh commitments. Cancellation endpoints remain metadata-bearing coordinator operations; they are rate-limited and commitment-bound rather than made anonymous.
 
-Claim windows, withdrawal buckets, and paymaster relay. A configured claim delay separates batch settlement from note redemption. Withdrawal amounts are compared against denomination buckets. Gas for public exits routes through a paymaster, decoupling the gas-paying account from the trading wallet. The public withdrawal recipient remains visible at exit; these defenses reduce timing and gas correlation rather than making the withdrawal unlinkable.
+Claim windows, optional withdrawal buckets, and paymaster relay. A configured claim delay separates batch settlement from note redemption. Exits consume a withdrawal nullifier before asset release and mark the redeemed output note. Denomination buckets are a client/paymaster policy; verifier settlement correctness does not depend on a particular bucket schedule. Gas for exits can route through a paymaster, decoupling the gas-paying account from the trading wallet. STRK20 open-note exits avoid a public L2 recipient transfer, while token, amount, open-note id, and claim timing remain public through STRK20. The legacy public-recipient compatibility path exposes recipient and transfer amount if enabled. These defenses reduce timing and gas correlation rather than making withdrawal unlinkable.
 
 Local execution analytics. Post-trade reports and TCA are computed inside the wallet from decrypted output records. Private order parameters, fill details, balances, and scheduler events are not transmitted to third-party analytics services by the protocol.
 
@@ -278,13 +270,13 @@ Local execution analytics. Post-trade reports and TCA are computed inside the wa
 <trust-boundary>
 Private order payloads are encrypted to the prover ingress boundary. The public coordinator receives commitments and routing metadata and does not receive order preimages. At batch close, the prover ingress decrypts admitted payloads, assembles witnesses, computes auction outputs, requests native proofs from the configured Starknet prover endpoint, and returns proof facts to AuctionVerifier.
 
-The prover ingress determines witness construction and liveness for the batches it processes; AuctionVerifier determines what the chain accepts. With split-proof enforcement active, the correctness of order preimages, spend authorizations, funding-note-set bindings, nullifier derivation, allocation feasibility, privacy gates, and clearing-price optimality is proved inside Cairo and bound onchain before settlement. The residual ingress boundary is privacy, availability, and inclusion: the ingress sees plaintext order preimages during witness assembly and decides which admitted payloads enter the witness.
+The prover ingress determines witness construction and liveness for the batches it processes; AuctionVerifier determines what the chain accepts. With split-proof enforcement active, the correctness of order preimages, spend authorizations, funding-note-set bindings, nullifier derivation, allocation feasibility, and clearing-price optimality is proved inside Cairo and bound onchain before settlement. The residual ingress boundary is privacy, availability, and inclusion: the ingress sees plaintext order preimages during witness assembly and decides which admitted payloads enter the witness.
 
 AuctionVerifier accepts a state transition only when proof facts match the configured proof program hash, satisfy the proof freshness window, bind to the batch registry, and match the verifier's current roots. The proof program can be locked after deployment. With split-proof enforcement active, the recorded admission root and auction-result transcript commitment must also match the settlement transcript before any state mutation is accepted. The operational controls on the ingress are key pinning, receipt signing, private payload no-logging with short retention windows, request size caps, rate limits, and monitoring.
 
 Administrative authority is separated from fee custody in the protocol surface. AuctionVerifier supports emergency pause, a pause guardian, two-step admin transfer, proof-program locking, bounded claim-delay configuration, pair-fee configuration, protocol-fee-recipient configuration, and relay-fee-recipient configuration. Pair fee changes are timelocked for 24 hours after the initial configuration. Protocol and relay fee recipient changes are timelocked for seven days. The verifier exposes no general upgrade entrypoint; after the proof program is locked, changing the proof program requires redeployment rather than an admin call.
 
-Transport privacy is split by path. OHTTP is enabled by default on the prover-runtime-to-native-prover endpoint path and can be explicitly disabled by configuration. Tor, mixnets, and PIR for trader-to-coordinator and trader-to-indexer paths are not default protocol dependencies; they can be added at the client or infrastructure layer without changing the settlement or proof statements.
+Transport privacy is split by path. The prover-runtime-to-native-prover endpoint path uses OHTTP. Tor, mixnets, and PIR for trader-to-coordinator and trader-to-indexer paths are transport extensions that can be added at the client or infrastructure layer without changing the settlement or proof statements.
 
 = 7. Conclusion
 <conclusion>
@@ -297,7 +289,7 @@ The public chain sees enabled markets, scheduled epochs, proof facts, root trans
 <appendix-a-public-leakage-boundary>
 #set par(justify: false, first-line-indent: 0pt, leading: 0.52em, spacing: 0.48em)
 #set text(size: 9.55pt)
-After the defense stack in Section 5.3, the allowed public leakage function `L` contains the enabled pairs and epoch schedules; fixed epoch duration and deployment configuration; proof program hashes and verifier configuration; batch identifiers and root transition sequence; bucketed output bundle size class per epoch, not the exact fill count within the bucket; delayed artifact availability after the configured jittered delay range; deposit transactions and public fields from the selected funding rail; note consolidation proof facts, root transitions, and output bundle references; withdrawal transactions, public recipients, and public adapter fields; coarse timing of paymaster-relayed withdrawals; and gas paid by protocol, coordinator, or paymaster accounts.
+After the defense stack in Section 5.3, the allowed public leakage function `L` contains the enabled pairs and epoch schedules; fixed epoch duration and deployment configuration; proof program hashes and verifier configuration; batch identifiers and root transition sequence; bucketed output bundle size class per epoch, not the exact fill count within the bucket; delayed artifact availability after the configured jittered delay range; STRK20 funding-pool events and Zylith funding-activation calldata, including activation timing, funding commitment, deposit root, and encrypted activation; note consolidation proof facts, root transitions, and output bundle references; withdrawal staging transactions and proof facts; STRK20 open-note claim transactions that reveal token, amount, open-note id, and claim timing; legacy public-recipient withdrawal transactions only if that compatibility path is enabled; and gas paid by protocol, coordinator, or paymaster accounts.
 
 The public transcript is designed not to reveal plaintext order side, size, or limit price; funding note ownership or private balances; output note ownership before withdrawal; exact private fill count inside a padded output bucket; hidden maker curve shape, inventory bands, or unfilled depth; scheduler parent strategy, remaining schedule, or total parent size; the association between a child commitment and its parent; or the notes, amounts, and owner involved in a consolidation operation.
 
@@ -324,17 +316,17 @@ Deposit entry, user-facing transport, and private retrieval are protocol-edge su
     [Settlement transcript structure], [root-only calldata; delayed public transcript routes; full transcripts behind bearer-auth internal routes],
     [Artifact publication timing], [delayed public artifact availability after configured multi-epoch jitter range; heartbeat-dependent for quiet markets; public bundles aggregate pairs across epoch buckets],
     [Gas payer identity], [protocol-side settlement account for batch settlement; paymaster relay for withdrawals],
-    [Deposit entry correlation], [Starknet Privacy funding rail; deposit-note activation; amount bucketing as client policy],
+    [Deposit entry correlation], [STRK20 shielding rail; Zylith activation reveals timing and opaque activation fields; note preimage and deposit nonce remain wallet-local],
     [Claim and exit timing], [claim delay window; withdrawal window policy],
     [Withdrawal amount], [denomination bucket policy],
     [Note consolidation timing], [root-only maintenance statement; padded output bundle; delayed artifacts; wallet policy can batch consolidation away from sensitive trading windows],
     [Order submission timing], [submission smoothing within batch window; batch safety buffer],
     [Encrypted payload metadata], [private payload size caps; padded ingress responses; coarse status errors],
     [Client query patterns], [fixed polling cadence; all-enabled-pair checks; epoch-range artifact scanning],
-    [Thin-batch inference], [participant, liquidity, eligible-order, and dominance gates; gate-failure no-fill artifacts],
-    [Clearing-price sequence], [proof-bound clearing rule via `assert_best_clearing_price` in the auction-result statement; privacy gates; delayed and bucketed public metrics],
+    [Thin-batch inference], [fixed epochs, hidden order preimages, uniform clearing, maker-liquidity monitoring, delayed artifacts, and bucketed public metrics],
+    [Clearing-price sequence], [proof-bound clearing rule via `assert_best_clearing_price` in the auction-result statement; delayed and bucketed public metrics],
     [Long-lived strategy rhythm], [fresh child commitments; randomized slicing; exact-slot renewal preauthorization; parent cancellation registry; child replay protection],
-    [Maker curve fingerprinting], [fresh per-epoch curve commitments; bounded renewal windows; per-epoch rotation; maker dominance caps; exposure controls],
+    [Maker curve fingerprinting], [fresh per-epoch curve commitments; bounded renewal windows; per-epoch rotation; maker exposure controls],
     [Cancellation timing], [open-batch-only cancellation windows; fresh replacement commitments],
     [Order preimage at witness assembly], [encrypted ingress; key pinning; receipt signing; no private payload logging; short retention; request caps],
     [Client private state], [encrypted local vault; local note scanner; encrypted recovery artifacts],
@@ -397,11 +389,11 @@ The following sketches name the verifier-bound public fields, private witness ma
 
 == D.1 Admission Statement
 <d-1-admission-statement>
-The public interface is `batch_id`, `order_commitment_root`, and `admission_root`. The witness contains the settlement payload, admitted order preimages, funding note preimages for the bounded input set and spend-authorization material, plus recipient, renewal, and maker-curve material where applicable. The admitted order summary is the vector of order commitment, side, order type, maker-curve commitment, limit price, amount, minimum fill, time-in-force, funding-note aggregate amount, and funding-note owner key. The statement proves that `batch_id` and `order_commitment_root` are read from `settlement_payload`; order vectors are length-consistent and order commitments are unique; the ordered commitment root of the admitted commitments equals `order_commitment_root`; each order commitment equals the hash of its preimage; each non-cover order has a valid funding authorization under the committed spend authority; each input note commitment, the aggregate note reference, and the aggregate nullifier are mutually consistent, with each nullifier derived from the note commitment and note-secret material; input-asset compatibility follows order side; time-in-force, fill-or-kill, expiry, recipient authority, parent renewal, and maker-curve fields are well formed, including minimum band count, pair-specific minimum price range, per-band minimum depth, and parent renewal fields where relay or maker-fee eligibility is claimed; and `admission_root` is the Poseidon root of the admitted order summaries.
+The public interface is `batch_id`, `order_commitment_root`, and `admission_root`. The witness contains the settlement payload, admitted order preimages, funding note preimages for the bounded input set and spend-authorization material, plus recipient, renewal, and maker-curve material where applicable. The admitted order summary is the vector of order commitment, side, order type, maker-curve commitment, limit price, amount, minimum fill, time-in-force, funding-note aggregate amount, and funding-note owner key. The statement proves that `batch_id` and `order_commitment_root` are read from `settlement_payload`; order vectors are length-consistent and order commitments are unique; the ordered commitment root of the admitted commitments equals `order_commitment_root`; each order commitment equals the hash of its preimage; each non-cover order has a valid funding authorization under the committed spend authority; each input note commitment, the aggregate note reference, and the aggregate nullifier are mutually consistent, with each nullifier derived from the note commitment and note-secret material; input-asset compatibility follows order side; time-in-force, fill-or-kill, expiry, recipient authority, parent renewal, and maker-curve fields are well formed, including minimum band count, pair-specific minimum price range, per-band minimum depth, and parent renewal fields where relay-fee eligibility is claimed; and `admission_root` is the Poseidon root of the admitted order summaries.
 
 == D.2 Auction-Result Statement
 <d-2-auction-result-statement>
-The public interface is `batch_id`, `order_commitment_root`, `admission_root`, and `transcript_commitment`. The witness contains the settlement payload, admitted order summaries, allocation vector, matched-order bindings, maker-curve summaries, and privacy-gate parameters. The statement proves that `transcript_commitment` is the transcript hash of `settlement_payload`; `order_commitment_root` matches the ordered root of admitted commitments; `admission_root` matches the admitted order summary root; maker curve commitments are consistent with the curve summaries used in allocation; private fills, when present, match the committed clearing price, balance buy and sell base volume, satisfy minimum-fill and fill-or-kill constraints, and maximize matched base volume subject to order constraints under deterministic tie-break rules; no-fill paths have zero allocations and either no executable auction, a valid privacy-gate failure, or a heartbeat-cover path; and configured privacy gates succeed for private fills.
+The public interface is `batch_id`, `order_commitment_root`, `admission_root`, and `transcript_commitment`. The witness contains the settlement payload, admitted order summaries, allocation vector, matched-order bindings, and maker-curve summaries. The statement proves that `transcript_commitment` is the transcript hash of `settlement_payload`; `order_commitment_root` matches the ordered root of admitted commitments; `admission_root` matches the admitted order summary root; maker curve commitments are consistent with the curve summaries used in allocation; private fills, when present, match the committed clearing price, balance buy and sell base volume, satisfy minimum-fill and fill-or-kill constraints, and maximize matched base volume subject to order constraints under deterministic tie-break rules; and no-fill paths have zero allocations with no executable auction or heartbeat-cover order flow.
 
 == D.3 Settlement Statement
 <d-3-settlement-statement>
@@ -417,7 +409,11 @@ The public interface is `transcript_commitment`, `prior_renewal_root`, `renewal_
 
 == D.6 Note Consolidation Statement
 <d-6-note-consolidation-statement>
-The public interface is `consolidation_id`, `consolidation_commitment`, `output_bundle_ref`, prior note and nullifier roots, consumed note and nullifier roots, `output_note_root`, `new_note_root`, and `new_nullifier_root`. The witness contains input note preimages, spend authorization under the common spend authority, note membership proofs, input nullifiers and 128-depth sparse non-membership and insertion paths, output note preimages, and output recovery records. The statement proves that all input notes are already owned notes of the same asset and spend authority; input note commitments and nullifiers are correctly derived; input notes are included in the prior note root; input nullifiers are absent from the prior nullifier root and inserted into `new_nullifier_root`; output notes are correctly formed; output recovery records and dummy commitments bind to `output_bundle_ref`; input value equals output value; consumed-note, consumed-nullifier, output-note, new-note, and new-nullifier roots recompute from the witness; and `public_note_consolidation_commitment` over the calldata fields equals `consolidation_commitment`. The statement does not alter auction, renewal, or fee state.
+The public interface is `consolidation_id`, `consolidation_commitment`, `output_bundle_ref`, prior note and nullifier roots, consumed note and nullifier roots, `output_note_root`, `new_note_root`, and `new_nullifier_root`. The witness contains input note preimages, spend authorization under the common spend authority, note membership proofs, input nullifiers and 128-depth sparse non-membership and insertion paths, output note preimages, and output recovery records. The statement proves that all input notes are already owned notes of the same asset and spend authority; input note commitments and nullifiers are correctly derived; input notes are included in the prior note root; input nullifiers are absent from the prior nullifier root and inserted into `new_nullifier_root`; output notes are correctly formed; output recovery records and dummy commitments bind to `output_bundle_ref`; input value equals output value; consumed-note, consumed-nullifier, output-note, new-note, and new-nullifier roots recompute from the witness; and `public_note_consolidation_commitment` over the calldata fields equals `consolidation_commitment`. Recovery-record decryptability is authenticated during witness construction and artifact validation rather than by the Cairo statement, separating settlement validity from output-bundle availability. The statement does not alter auction, renewal, or fee state.
+
+== D.7 Settlement-Output Withdrawal Statement
+<d-7-settlement-output-withdrawal-statement>
+The public interface is `batch_id`, `note_commitment`, prior nullifier root, consumed nullifier root, and new nullifier root. The witness contains the settlement output note preimage, the derived output nullifier, and its 128-depth sparse non-membership and insertion path. The statement proves that the note commitment is derived from the output note preimage; the output nullifier is derived from the note commitment and note-secret material; the nullifier is absent from the prior nullifier root and inserted into the new nullifier root; and the public withdrawal commitment over the note, amount, authority, and nullifier roots is the statement message accepted by AuctionVerifier. AuctionVerifier separately checks that the note is included in the verifier-recorded output root for `batch_id`. In the legacy public-recipient path, the withdrawal signature binds the verifier, adapter, chain id, batch, note commitment, asset, amount, and recipient before releasing assets to L2. In the STRK20 open-note path, the first signature binds the verifier, adapter, chain id, batch, note commitment, asset, amount, and a staged exit commitment; the bridge stores the staged asset, amount, note commitment, and withdrawal authority; the second signature binds chain id, PrivacyDepositBridge address, STRK20 privacy-pool address, AuctionVerifier address, asset id, ERC20 token address, amount, exit commitment, and open-note id before the bridge returns an `OpenNoteDeposit` for the STRK20 pool to consume. The withdrawal statement does not reveal order preimages or maker-curve data. The STRK20 open-note path removes the public L2 recipient transfer, but STRK20 still exposes token, amount, open-note id, and claim timing.
 
 = Appendix E: Bounded MAPP Proof Sketch
 <appendix-e-bounded-mapp-proof-sketch>
@@ -425,7 +421,7 @@ This appendix states a bounded indistinguishability claim for the Zylith public 
 
 == E.1 Assumptions
 <e-1-assumptions>
-#block(below: 1.5pt)[*ZK.* The Cairo ZK-STARK proof system is zero-knowledge for the admission, auction-result, settlement, nullifier, renewal, and note-consolidation statements defined in Appendix D.]
+#block(below: 1.5pt)[*ZK.* The Cairo ZK-STARK proof system is zero-knowledge for the admission, auction-result, settlement, nullifier, renewal, note-consolidation, and settlement-output withdrawal statements defined in Appendix D.]
 #block(below: 1.5pt)[*ENC.* The note encryption scheme is IND-CPA secure under the note recognition key.]
 #block(below: 1.5pt)[*PRF.* The nullifier derivation function `H_nullifier` is pseudorandom.]
 #block(below: 1.5pt)[*COM.* The note commitment scheme is computationally binding and hiding.]
